@@ -326,6 +326,21 @@ export type Challenge = {
   requirements: Record<string, Record<string, string | number | boolean>>;
 };
 
+// Add the new challenge
+const newChallenge: Challenge = {
+  name: "left-to-right-right-to-left",
+  display: "Left to Right - Right to Left",
+  autoRole: false,
+  type: "custom",
+  parameters: [";lkjasdf"],
+  message:
+    "Complete the challenge by typing ;lkjasdf left to right and right to left.",
+  requirements: {
+    "left-to-right": { ";lkjasdf": true },
+    "right-to-left": { "fdsa;jkl": true },
+  },
+};
+
 /**
  * Fetches the list of challenges from the server.
  * @returns A promise that resolves to the list of challenges.
@@ -333,7 +348,7 @@ export type Challenge = {
 export async function getChallengeList(): Promise<Challenge[]> {
   try {
     const data = await cachedFetchJson<Challenge[]>("/challenges/_list.json");
-    return data;
+    return [...data, newChallenge];
   } catch (e) {
     throw new Error("Challenge list JSON fetch failed");
   }
@@ -351,7 +366,6 @@ export async function getSupportersList(): Promise<string[]> {
     throw new Error("Supporters list JSON fetch failed");
   }
 }
-
 /**
  * Fetches the list of contributors from the server.
  * @returns A promise that resolves to the list of contributors.
