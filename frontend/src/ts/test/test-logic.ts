@@ -66,6 +66,7 @@ import {
 import * as XPBar from "../elements/xp-bar";
 import { getActiveFunboxes } from "./funbox/list";
 import { getFunboxesFromString } from "@monkeytype/funbox";
+import * as CompositionState from "../states/composition";
 
 let failReason = "";
 const koInputVisual = document.getElementById("koInputVisual") as HTMLElement;
@@ -265,6 +266,7 @@ export function restart(options = {} as RestartOptions): void {
   MemoryFunboxTimer.reset();
   QuoteRateModal.clearQuoteStats();
   TestUI.reset();
+  CompositionState.setComposing(false);
 
   if (TestUI.resultVisible) {
     if (Config.randomTheme !== "off") {
@@ -1005,6 +1007,7 @@ export async function finish(difficultyFailed = false): Promise<void> {
     if (tt < 0) tt = 0;
     const acc = completedEvent.acc;
     TestStats.incrementIncompleteSeconds(tt);
+    TestStats.incrementRestartCount();
     TestStats.pushIncompleteTest(acc, tt);
   }
 
