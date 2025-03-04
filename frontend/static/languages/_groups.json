@@ -195,7 +195,7 @@
   },
   {
     "name": "thai",
-    "languages": ["thai"]
+    "languages": ["thai", "thai_20k"]
   },
   {
     "name": "tamil",
@@ -548,8 +548,8 @@
     "languages": ["yiddish"]
   },
   {
-    "name": "frysk",
-    "languages": ["frysk", "frysk_1k"]
+    "name": "frisian",
+    "languages": ["frisian", "frisian_1k"]
   },
   {
     "name": "pashto",
@@ -582,6 +582,10 @@
     ]
   },
   {
+    "name": "kabyle",
+    "languages": ["kabyle", "kabyle_1k", "kabyle_2k", "kabyle_5k", "kabyle_10k"]
+  },
+  {
     "name": "zulu",
     "languages": ["zulu"]
   },
@@ -601,6 +605,7 @@
       "code_javascript",
       "code_javascript_1k",
       "code_javascript_react",
+      "code_jule",
       "code_julia",
       "code_haskell",
       "code_html",

@@ -16,7 +16,11 @@ import { differenceInSeconds } from "date-fns/differenceInSeconds";
 import * as DateTime from "../utils/date-and-time";
 import { getHtmlByUserFlags } from "../controllers/user-flag-controller";
 import { getHTMLById as getBadgeHTMLbyId } from "../controllers/badge-controller";
-import { getDiscordAvatarUrl, isDevEnvironment } from "../utils/misc";
+import {
+  applyReducedMotion,
+  getDiscordAvatarUrl,
+  isDevEnvironment,
+} from "../utils/misc";
 import { abbreviateNumber } from "../utils/numbers";
 import {
   getCurrentWeekTimestamp,
@@ -24,9 +28,16 @@ import {
   getStartOfDayTimestamp,
 } from "@monkeytype/util/date-and-time";
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
+import { z } from "zod";
+import { LocalStorageWithSchema } from "../utils/local-storage-with-schema";
+import {
+  safeParse as parseUrlSearchParams,
+  serialize as serializeUrlSearchParams,
+} from "zod-urlsearchparams";
 // import * as ServerConfiguration from "../ape/server-configuration";
 
-type LeaderboardType = "allTime" | "weekly" | "daily";
+const LeaderboardTypeSchema = z.enum(["allTime", "weekly", "daily"]);
+type LeaderboardType = z.infer<typeof LeaderboardTypeSchema>;
 
 type AllTimeState = {
   type: "allTime";
@@ -66,6 +77,7 @@ type State = {
   title: string;
   error?: string;
   discordAvatarUrls: Map<string, string>;
+  scrollToUserAfterFill: boolean;
 } & (AllTimeState | WeeklyState | DailyState);
 
 const state = {
@@ -79,7 +91,26 @@ const state = {
   pageSize: 50,
   title: "All-time English Time 15 Leaderboard",
   discordAvatarUrls: new Map<string, string>(),
+  scrollToUserAfterFill: false,
 } as State;
+
+const SelectorSchema = z.object({
+  type: LeaderboardTypeSchema,
+  mode2: z.enum(["15", "60"]).optional(),
+  language: z.string().optional(),
+  yesterday: z.boolean().optional(),
+  lastWeek: z.boolean().optional(),
+});
+const UrlParameterSchema = SelectorSchema.extend({
+  page: z.number(),
+}).partial();
+type UrlParameter = z.infer<typeof UrlParameterSchema>;
+
+const selectorLS = new LocalStorageWithSchema({
+  key: "leaderboardSelector",
+  schema: SelectorSchema,
+  fallback: { type: "allTime", mode2: "15" },
+});
 
 function updateTitle(): void {
   const type =
@@ -203,14 +234,26 @@ async function requestData(update = false): Promise<void> {
       mode2: state.mode2,
     };
 
-    let response;
+    const requests: {
+      data:
+        | ReturnType<typeof Ape.leaderboards.get>
+        | ReturnType<typeof Ape.leaderboards.getDaily>
+        | undefined;
+      rank:
+        | ReturnType<typeof Ape.leaderboards.getRank>
+        | ReturnType<typeof Ape.leaderboards.getDailyRank>
+        | undefined;
+    } = {
+      data: undefined,
+      rank: undefined,
+    };
 
     if (state.type === "allTime") {
-      response = await Ape.leaderboards.get({
+      requests.data = Ape.leaderboards.get({
         query: { ...baseQuery, page: state.page },
       });
     } else {
-      response = await Ape.leaderboards.getDaily({
+      requests.data = Ape.leaderboards.getDaily({
         query: {
           ...baseQuery,
           page: state.page,
@@ -219,40 +262,46 @@ async function requestData(update = false): Promise<void> {
       });
     }
 
-    if (response.status === 200) {
-      state.data = response.body.data.entries;
-      state.count = response.body.data.count;
-      state.pageSize = response.body.data.pageSize;
+    if (isAuthenticated() && state.userData === null) {
+      if (state.type === "allTime") {
+        requests.rank = Ape.leaderboards.getRank({
+          query: { ...baseQuery },
+        });
+      } else {
+        requests.rank = Ape.leaderboards.getDailyRank({
+          query: {
+            ...baseQuery,
+            daysBefore: state.yesterday ? 1 : undefined,
+          },
+        });
+      }
+    }
+
+    const [dataResponse, rankResponse] = await Promise.all([
+      requests.data,
+      requests.rank,
+    ]);
+
+    if (dataResponse.status === 200) {
+      state.data = dataResponse.body.data.entries;
+      state.count = dataResponse.body.data.count;
+      state.pageSize = dataResponse.body.data.pageSize;
 
       if (state.type === "daily") {
         //@ts-ignore not sure why this is causing errors when it's clearly defined in the schema
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        state.minWpm = response.body.data.minWpm;
+        state.minWpm = dataResponse.body.data.minWpm;
       }
     } else {
       state.data = null;
       state.error = "Something went wrong";
       Notifications.add(
-        "Failed to get leaderboard: " + response.body.message,
+        "Failed to get leaderboard: " + dataResponse.body.message,
         -1
       );
     }
 
-    if (isAuthenticated() && state.userData === null) {
-      let rankResponse;
-
-      if (state.type === "allTime") {
-        rankResponse = await Ape.leaderboards.getRank({
-          query: { ...baseQuery },
-        });
-      } else {
-        rankResponse = await Ape.leaderboards.getDailyRank({
-          query: {
-            ...baseQuery,
-          },
-        });
-      }
-
+    if (state.userData === null && rankResponse !== undefined) {
       if (rankResponse.status === 200) {
         if (rankResponse.body.data !== null) {
           state.userData = rankResponse.body.data;
@@ -288,31 +337,56 @@ async function requestData(update = false): Promise<void> {
     }
     return;
   } else if (state.type === "weekly") {
-    const data = await Ape.leaderboards.getWeeklyXp({
+    const requests: {
+      data: ReturnType<typeof Ape.leaderboards.getWeeklyXp> | undefined;
+      rank: ReturnType<typeof Ape.leaderboards.getWeeklyXpRank> | undefined;
+    } = {
+      data: undefined,
+      rank: undefined,
+    };
+
+    requests.data = Ape.leaderboards.getWeeklyXp({
       query: { page: state.page, weeksBefore: state.lastWeek ? 1 : undefined },
     });
 
-    if (data.status === 200) {
-      state.data = data.body.data.entries;
-      state.count = data.body.data.count;
-      state.pageSize = data.body.data.pageSize;
+    if (isAuthenticated() && state.userData === null) {
+      requests.rank = Ape.leaderboards.getWeeklyXpRank({
+        query: {
+          weeksBefore: state.lastWeek ? 1 : undefined,
+        },
+      });
+    }
+
+    const [dataResponse, rankResponse] = await Promise.all([
+      requests.data,
+      requests.rank,
+    ]);
+
+    if (dataResponse.status === 200) {
+      state.data = dataResponse.body.data.entries;
+      state.count = dataResponse.body.data.count;
+      state.pageSize = dataResponse.body.data.pageSize;
     } else {
       state.data = null;
       state.error = "Something went wrong";
-      Notifications.add("Failed to get leaderboard: " + data.body.message, -1);
+      Notifications.add(
+        "Failed to get leaderboard: " + dataResponse.body.message,
+        -1
+      );
     }
 
-    if (isAuthenticated() && state.userData === null) {
-      const userData = await Ape.leaderboards.getWeeklyXpRank();
-
-      if (userData.status === 200) {
-        if (userData.body.data !== null) {
-          state.userData = userData.body.data;
+    if (state.userData === null && rankResponse !== undefined) {
+      if (rankResponse.status === 200) {
+        if (rankResponse.body.data !== null) {
+          state.userData = rankResponse.body.data;
         }
       } else {
         state.userData = null;
         state.error = "Something went wrong";
-        Notifications.add("Failed to get rank: " + userData.body.message, -1);
+        Notifications.add(
+          "Failed to get rank: " + rankResponse.body.message,
+          -1
+        );
       }
     }
 
@@ -600,7 +674,7 @@ function fillUser(): void {
   if (
     isAuthenticated() &&
     !isDevEnvironment() &&
-    (DB.getSnapshot()?.typingStats?.timeTyping ?? 0) < 72000
+    (DB.getSnapshot()?.typingStats?.timeTyping ?? 0) < 7200
   ) {
     $(".page.pageLeaderboards .bigUser").html(
       '<div class="warning">Your account must have 2 hours typed to be placed on the leaderboard.</div>'
@@ -609,8 +683,14 @@ function fillUser(): void {
   }
 
   if (isAuthenticated() && state.type === "daily" && state.userData === null) {
+    let str = `Not qualified`;
+
+    if (!state.yesterday) {
+      str += ` (min speed required: ${state.minWpm} wpm)`;
+    }
+
     $(".page.pageLeaderboards .bigUser").html(
-      `<div class="warning">Not qualified (min speed required: ${state.minWpm} wpm)</div>`
+      `<div class="warning">${str}</div>`
     );
     return;
   }
@@ -623,15 +703,6 @@ function fillUser(): void {
   }
 
   if (state.data === null) {
-    return;
-  }
-
-  if (
-    (state.type === "weekly" && state.lastWeek) ||
-    (state.type === "daily" && state.yesterday)
-  ) {
-    $(".page.pageLeaderboards .bigUser").addClass("hidden");
-    $(".page.pageLeaderboards .tableAndUser > .divider").removeClass("hidden");
     return;
   }
 
@@ -795,7 +866,7 @@ function fillUser(): void {
           <div class="sub">${formatted.time}</div>
         </div>
         <div class="stat wide">
-          <div class="title">date</div>
+          <div class="title">last activity</div>
           <div class="value">${format(
             userData.lastActivityTimestamp,
             "dd MMM yyyy HH:mm"
@@ -858,6 +929,19 @@ function updateContent(): void {
   updateJumpButtons();
   updateTimerVisibility();
   fillTable();
+
+  if (state.scrollToUserAfterFill) {
+    const windowHeight = $(window).height() ?? 0;
+    const offset = $(`.tableAndUser .me`).offset()?.top ?? 0;
+    const scrollTo = offset - windowHeight / 2;
+    $([document.documentElement, document.body]).animate(
+      {
+        scrollTop: scrollTo,
+      },
+      applyReducedMotion(500)
+    );
+    state.scrollToUserAfterFill = false;
+  }
 }
 
 function updateTypeButtons(): void {
@@ -1030,6 +1114,7 @@ function handleJumpButton(action: string, page?: number): void {
           }
 
           state.page = page;
+          state.scrollToUserAfterFill = true;
         }
       }
     }
@@ -1055,69 +1140,82 @@ function handleYesterdayLastWeekButton(action: string): void {
 }
 
 function updateGetParameters(): void {
-  const params = new URLSearchParams();
+  const params: UrlParameter = {};
 
-  params.set("type", state.type);
+  params.type = state.type;
   if (state.type === "allTime") {
-    params.set("mode2", state.mode2);
+    params.mode2 = state.mode2;
   } else if (state.type === "daily") {
-    params.set("language", state.language);
-    params.set("mode2", state.mode2);
+    params.language = state.language;
+    params.mode2 = state.mode2;
     if (state.yesterday) {
-      params.set("yesterday", "true");
-    } else {
-      params.delete("yesterday");
+      params.yesterday = true;
     }
   } else if (state.type === "weekly") {
     if (state.lastWeek) {
-      params.set("lastWeek", "true");
-    } else {
-      params.delete("lastWeek");
+      params.lastWeek = true;
     }
   }
 
-  params.set("page", (state.page + 1).toString());
+  params.page = state.page + 1;
 
-  const newUrl = `${window.location.pathname}?${params.toString()}`;
+  const urlParams = serializeUrlSearchParams({
+    schema: UrlParameterSchema,
+    data: params,
+  });
+
+  const newUrl = `${window.location.pathname}?${urlParams.toString()}`;
   window.history.replaceState({}, "", newUrl);
+
+  selectorLS.set(state);
 }
 
 function readGetParameters(): void {
-  const params = new URLSearchParams(window.location.search);
+  const urlParams = new URLSearchParams(window.location.search);
 
-  const type = params.get("type") as "allTime" | "weekly" | "daily";
-  if (type) {
-    state.type = type;
+  if (urlParams.size == 0) {
+    Object.assign(state, selectorLS.get());
+    return;
+  }
+
+  const parsed = parseUrlSearchParams({
+    schema: UrlParameterSchema,
+    input: urlParams,
+  });
+  if (!parsed.success) {
+    return;
+  }
+  const params = parsed.data;
+
+  if (params.type !== undefined) {
+    state.type = params.type;
   }
 
   if (state.type === "allTime") {
-    const mode = params.get("mode2") as "15" | "60";
-    if (mode) {
-      state.mode2 = mode;
+    if (params.mode2) {
+      state.mode2 = params.mode2;
     }
   } else if (state.type === "daily") {
-    const language = params.get("language");
-    const dailyMode = params.get("mode2") as "15" | "60";
-    const yesterday = params.get("yesterday") as string;
-    if (language !== null) {
-      state.language = language;
+    if (params.language !== undefined) {
+      state.language = params.language;
     }
-    if (dailyMode) {
-      state.mode2 = dailyMode;
+    if (state.language === undefined) {
+      state.language = "english";
     }
-    if (yesterday !== null && yesterday === "true") {
-      state.yesterday = true;
+    if (params.mode2 !== undefined) {
+      state.mode2 = params.mode2;
+    }
+    if (params.yesterday !== undefined) {
+      state.yesterday = params.yesterday;
     }
   } else if (state.type === "weekly") {
-    const lastWeek = params.get("lastWeek") as string;
-    if (lastWeek !== null && lastWeek === "true") {
-      state.lastWeek = true;
+    if (params.lastWeek !== undefined) {
+      state.lastWeek = params.lastWeek;
     }
   }
 
-  const page = params.get("page");
-  if (page !== null) {
-    state.page = parseInt(page, 10) - 1;
+  if (params.page !== undefined) {
+    state.page = params.page - 1;
 
     if (state.page < 0) {
       state.page = 0;
@@ -1174,9 +1272,11 @@ $(".page.pageLeaderboards .buttonGroup.secondary").on(
     ) {
       if (state.mode2 === mode) return;
       state.mode2 = mode;
+      state.page = 0;
     } else if (language !== undefined && state.type === "daily") {
       if (state.language === language) return;
       state.language = language;
+      state.page = 0;
     } else {
       return;
     }
